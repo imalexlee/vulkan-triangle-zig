@@ -1,0 +1,283 @@
+const std = @import("std");
+const c = @import("clibs.zig");
+const errors = @import("errors.zig");
+const vk_utils = @import("vk_utils.zig");
+const models = @import("models.zig");
+
+const Self = @This();
+const VulkanErrors = errors.VulkanErrors;
+const GlfwErrors = errors.GlfwErrors;
+
+const width = 800;
+const height = 600;
+const debug: bool = std.debug.runtime_safety;
+const validation_layers = [_][]const u8{
+    "VK_LAYER_KHRONOS_validation",
+};
+
+allocator: std.mem.Allocator,
+window: ?*c.GLFWwindow = undefined,
+
+instance: c.VkInstance = undefined,
+debug_messenger: c.VkDebugUtilsMessengerEXT = undefined,
+physical_device: c.VkPhysicalDevice = null,
+device: c.VkDevice = undefined,
+graphics_queue: c.VkQueue = null,
+surface: c.VkSurfaceKHR = undefined,
+required_extensions: [][*]const u8 = &.{},
+
+fn debugCallback(
+    severity: c.VkDebugUtilsMessageSeverityFlagBitsEXT,
+    message_type: c.VkDebugUtilsMessageTypeFlagsEXT,
+    callback_data: *c.VkDebugUtilsMessengerCallbackDataEXT,
+    user_data: *void,
+) callconv(.C) c.VkBool32 {
+    _ = severity;
+    _ = message_type;
+    _ = user_data;
+    std.debug.print("validation layer: {s}\n", .{callback_data.pMessage});
+    return c.VK_FALSE;
+}
+
+pub fn init(allocator: std.mem.Allocator) Self {
+    return Self{
+        .allocator = allocator,
+    };
+}
+
+pub fn run(self: *Self) !void {
+    try initWindow(self);
+    try initVulkan(self);
+    mainLoop(self);
+    cleanup(self);
+}
+
+fn initWindow(self: *Self) !void {
+    const result = c.glfwInit();
+    if (result != c.GL_TRUE) return GlfwErrors.WindowCreationError;
+    c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
+    self.window = c.glfwCreateWindow(width, height, "Vulkan", null, null);
+}
+
+fn initVulkan(self: *Self) !void {
+    try createInstance(self);
+    try setupDebugMessenger(self);
+    try pickPhysicalDevice(self);
+    try createLogicalDevice(self);
+}
+
+fn createLogicalDevice(self: *Self) !void {
+    const indices = try findQueueFamilies(self, self.physical_device);
+
+    var queue_priority: f32 = 1.0;
+
+    var queue_create_info = c.VkDeviceQueueCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        .queueFamilyIndex = indices.graphics_family.?,
+        .queueCount = 1,
+        .pQueuePriorities = &queue_priority,
+    };
+
+    var device_features = c.VkPhysicalDeviceFeatures{};
+
+    var device_create_info = c.VkDeviceCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .pQueueCreateInfos = &queue_create_info,
+        .queueCreateInfoCount = 1,
+        .pEnabledFeatures = &device_features,
+        .ppEnabledExtensionNames = null,
+    };
+    device_create_info.enabledExtensionCount = 1;
+    const ext_names = [_][]const u8{"VK_KHR_portability_subset"};
+    device_create_info.ppEnabledExtensionNames = @ptrCast(&ext_names);
+    if (debug) {
+        device_create_info.enabledLayerCount = @intCast(validation_layers.len);
+        device_create_info.ppEnabledLayerNames = @ptrCast(&validation_layers);
+    } else {
+        device_create_info.enabledLayerCount = 0;
+    }
+
+    const result = c.vkCreateDevice(self.physical_device, &device_create_info, null, &self.device);
+    if (result != c.VK_SUCCESS) {
+        return VulkanErrors.CannotCreateLogicalDevice;
+    }
+    c.vkGetDeviceQueue(self.device, indices.graphics_family.?, 0, &self.graphics_queue);
+}
+
+fn pickPhysicalDevice(self: *Self) !void {
+    var device_count: u32 = 0;
+    var result: c.VkResult = undefined;
+    result = c.vkEnumeratePhysicalDevices(self.instance, &device_count, null);
+    // if not successful or no gpu at all, still an error
+    if (result != c.VK_SUCCESS or device_count == 0) return VulkanErrors.PhysicalDeviceEnumerationError;
+    const devices = try self.allocator.alloc(c.VkPhysicalDevice, device_count);
+    defer self.allocator.free(devices);
+    result = c.vkEnumeratePhysicalDevices(self.instance, &device_count, @ptrCast(devices));
+
+    if (result != c.VK_SUCCESS) return VulkanErrors.PhysicalDeviceEnumerationError;
+
+    for (devices) |device| {
+        if (try isDeviceSuitable(self, device)) {
+            self.physical_device = device;
+            break;
+        }
+    }
+
+    if (self.physical_device == null) return VulkanErrors.NoSuitablePhysicalDevice;
+}
+
+fn isDeviceSuitable(self: *Self, device: c.VkPhysicalDevice) !bool {
+    const indices = try findQueueFamilies(self, device);
+
+    return (indices.graphics_family != null);
+}
+
+fn findQueueFamilies(self: *Self, device: c.VkPhysicalDevice) !models.QueueFamilyIndices {
+    var indices: models.QueueFamilyIndices = undefined;
+    var queue_family_count: u32 = 0;
+
+    c.vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, null);
+    const queue_familes = try self.allocator.alloc(c.VkQueueFamilyProperties, queue_family_count);
+    defer self.allocator.free(queue_familes);
+    c.vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, queue_familes.ptr);
+
+    var i: u32 = 0;
+    for (queue_familes) |family| {
+        if ((family.queueFlags & c.VK_QUEUE_GRAPHICS_BIT) == 1) {
+            indices.graphics_family = i;
+        }
+        if (indices.graphics_family != null) break;
+        i += 1;
+    }
+
+    return indices;
+}
+
+fn populateDebugMessengerCreateInfo(create_info: *c.VkDebugUtilsMessengerCreateInfoEXT) void {
+    create_info.sType =
+        c.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+
+    create_info.messageSeverity =
+        c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+        c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+        c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+
+    create_info.messageType =
+        c.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+        c.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+        c.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+
+    create_info.pNext = null;
+    create_info.flags = 0;
+    create_info.pfnUserCallback = @ptrCast(&debugCallback);
+}
+
+fn setupDebugMessenger(self: *Self) !void {
+    if (!debug) return;
+
+    var debug_create_info: c.VkDebugUtilsMessengerCreateInfoEXT = undefined;
+    populateDebugMessengerCreateInfo(&debug_create_info);
+
+    const result = vk_utils.CreateDebugUtilsMessengerEXT(self.instance, &debug_create_info, null, &self.debug_messenger);
+    if (result != c.VK_SUCCESS) return VulkanErrors.DebugMessangerError;
+}
+
+fn checkValidationLayerSupport(self: *Self) !bool {
+    var layer_count: u32 = 0;
+    var result: c.VkResult = undefined;
+    result = c.vkEnumerateInstanceLayerProperties(&layer_count, null);
+    if (result != c.VK_SUCCESS) return VulkanErrors.InstanceLayerPropertiesError;
+
+    const avail_layers = try self.allocator.alloc(c.VkLayerProperties, layer_count);
+    defer self.allocator.free(avail_layers);
+
+    result = c.vkEnumerateInstanceLayerProperties(&layer_count, @ptrCast(avail_layers));
+    if (result != c.VK_SUCCESS) return VulkanErrors.InstanceLayerPropertiesError;
+
+    for (validation_layers) |layer| {
+        var layer_found: bool = false;
+        for (avail_layers) |avail_layer| {
+            const equal = std.mem.eql(u8, layer, avail_layer.layerName[0..layer.len]);
+
+            if (equal) {
+                layer_found = true;
+                break;
+            }
+        }
+        if (!layer_found) return false;
+    }
+    return true;
+}
+
+fn getRequiredExtensions(self: *Self) ![][*]const u8 {
+    var glfw_ext_count: u32 = 0;
+
+    const glfw_extensions = c.glfwGetRequiredInstanceExtensions(&glfw_ext_count);
+
+    var glfw_ext_list = std.ArrayList([*:0]const u8).init(self.allocator);
+    //try glfw_ext_list.appendSlice(@ptrCast(glfw_extensions));
+    for (0..glfw_ext_count) |i| {
+        try glfw_ext_list.append(glfw_extensions[i]);
+    }
+    if (debug) try glfw_ext_list.append(c.VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+    // adding KHR_PORTABILITY_SUBSET is required for moltenVK
+    try glfw_ext_list.append(c.VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+
+    // add following extension to play well with M1 Mac
+    try glfw_ext_list.append("VK_KHR_get_physical_device_properties2");
+
+    glfw_ext_list.shrinkAndFree(glfw_ext_list.items.len);
+
+    return glfw_ext_list.items;
+}
+
+fn createInstance(self: *Self) !void {
+    const layers_supported = try checkValidationLayerSupport(self);
+    if (debug and !layers_supported) {
+        return VulkanErrors.ValidationLayersNotAvailable;
+    }
+
+    const app_info = c.VkApplicationInfo{
+        .sType = c.VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        .pApplicationName = "vulkan-tutorial-zig",
+        .applicationVersion = c.VK_MAKE_API_VERSION(0, 1, 0, 0),
+        .pEngineName = "No Engine",
+        .engineVersion = c.VK_MAKE_API_VERSION(0, 1, 0, 0),
+        .apiVersion = c.VK_API_VERSION_1_0,
+    };
+
+    self.required_extensions = try getRequiredExtensions(self);
+
+    var debug_create_info: c.VkDebugUtilsMessengerCreateInfoEXT = undefined;
+    if (debug) populateDebugMessengerCreateInfo(&debug_create_info);
+
+    var instance_create_info = c.VkInstanceCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .pApplicationInfo = &app_info,
+        .enabledExtensionCount = @intCast(self.required_extensions.len),
+        .ppEnabledExtensionNames = @ptrCast(self.required_extensions.ptr),
+        .ppEnabledLayerNames = if (debug) @ptrCast(&validation_layers) else null,
+        .enabledLayerCount = if (debug) validation_layers.len else 0,
+        .pNext = if (debug) @as(*c.VkDebugUtilsMessengerCreateInfoEXT, @ptrCast(&debug_create_info)) else null,
+    };
+
+    instance_create_info.flags |= c.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+
+    const result = c.vkCreateInstance(&instance_create_info, null, &self.instance);
+    if (result != c.VK_SUCCESS) return VulkanErrors.InstanceCreationError;
+}
+
+fn mainLoop(self: *Self) void {
+    while (c.glfwWindowShouldClose(self.window) == 0) {
+        c.glfwPollEvents();
+    }
+}
+
+fn cleanup(self: *Self) void {
+    c.vkDestroyDevice(self.device, null);
+    if (debug) vk_utils.DestroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
+    c.vkDestroyInstance(self.instance, null);
+    c.glfwDestroyWindow(self.window);
+    c.glfwTerminate();
+}
