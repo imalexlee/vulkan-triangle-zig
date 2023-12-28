@@ -10,7 +10,7 @@ const GlfwErrors = errors.GlfwErrors;
 
 const WIDTH = 800;
 const HEIGHT = 600;
-const debug: bool = std.debug.runtime_safety;
+const DEBUG: bool = std.debug.runtime_safety;
 const validation_layers = [_][*:0]const u8{
     "VK_LAYER_KHRONOS_validation",
 };
@@ -18,6 +18,8 @@ const device_extensions = [_][*:0]const u8{
     c.VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     "VK_KHR_portability_subset",
 };
+
+required_extensions: [][*]const u8 = &.{},
 
 allocator: std.mem.Allocator,
 window: ?*c.GLFWwindow = null,
@@ -29,9 +31,12 @@ device: c.VkDevice = null,
 graphics_queue: c.VkQueue = null,
 present_queue: c.VkQueue = null,
 surface: c.VkSurfaceKHR = null,
+
 swap_chain: c.VkSwapchainKHR = null,
-swap_chain_image: []c.VkImage = null,
-required_extensions: [][*]const u8 = &.{},
+swap_chain_images: []c.VkImage = &.{},
+swap_chain_extent: c.VkExtent2D = undefined,
+swap_chain_image_format: c.VkFormat = undefined,
+swap_chain_image_views: []c.VkImageView = &.{},
 
 fn debugCallback(
     severity: c.VkDebugUtilsMessageSeverityFlagBitsEXT,
@@ -74,6 +79,132 @@ fn initVulkan(self: *Self) !void {
     try pickPhysicalDevice(self);
     try createLogicalDevice(self);
     try createSwapChain(self);
+    try createImageViews(self);
+    try createGraphicsPipeline(self);
+}
+
+fn createGraphicsPipeline(self: *Self) !void {
+    const vert_shader_code align(4) = @embedFile("shaders/vert.spv").*;
+    const frag_shader_code align(4) = @embedFile("shaders/frag.spv").*;
+
+    const vert_shader_module = try vk_utils.createShaderModule(self.device, &vert_shader_code);
+    const frag_shader_module = try vk_utils.createShaderModule(self.device, &frag_shader_code);
+
+    const vert_shader_stage_info = c.VkPipelineShaderStageCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = c.VK_SHADER_STAGE_VERTEX_BIT,
+        .module = vert_shader_module,
+        .pName = "main",
+    };
+
+    const frag_shader_stage_info = c.VkPipelineShaderStageCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = frag_shader_module,
+        .pName = "main",
+    };
+
+    const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{ vert_shader_stage_info, frag_shader_stage_info };
+    _ = shader_stages;
+
+    const vertex_input_info = c.VkPipelineVertexInputStateCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 0,
+        .pVertexBindingDescriptions = null,
+        .vertexAttributeDescriptionCount = 0,
+        .pVertexAttributeDescriptions = null,
+    };
+
+    _ = vertex_input_info;
+
+    const input_assembly = c.VkPipelineInputAssemblyStateCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = c.VK_FALSE,
+    };
+    _ = input_assembly;
+
+    // viewport and scissor structs defined if going with static sizing
+    //
+    //  const viewport = c.VkViewport{
+    //      .x = 0.0,
+    //      .y = 0.0,
+    //      .width = self.swap_chain_extent.width,
+    //      .height = self.swap_chain_extent.height,
+    //      .minDepth = 0.0,
+    //      .maxDepth = 1.0,
+    //  };
+    //
+    //    const scissor = c.VkRect2D{
+    //        .offset = .{.x = 0, .y = 0,},
+    //        .extent = self.swap_chain_extent,
+    //    };
+    const dynamic_states = [_]c.VkDynamicState{
+        c.VK_DYNAMIC_STATE_VIEWPORT,
+        c.VK_DYNAMIC_STATE_SCISSOR,
+    };
+
+    const dynamic_state_info = c.VkPipelineDynamicStateCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .pDynamicStates = &dynamic_states,
+        .dynamicStateCount = @intCast(dynamic_states.len),
+    };
+
+    _ = dynamic_state_info;
+
+    const viewport_state_info = c.VkPipelineViewportStateCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .scissorCount = 1,
+        .viewportCount = 1,
+    };
+    _ = viewport_state_info;
+
+    const rasterizer = c.VkPipelineRasterizationStateCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable = c.VK_FALSE,
+        .rasterizerDiscardEnable = c.VK_FALSE,
+        // play around with this. need to enable a gpu feature for this
+        .polygonMode = c.VK_POLYGON_MODE_FILL,
+        // if you want thicker lines, must enable the wideLines gpu feature
+        .lineWidth = 1.0,
+        .cullMode = c.VK_CULL_MODE_BACK_BIT,
+        .frontFace = c.VK_FRONT_FACE_CLOCKWISE,
+        .depthBiasEnable = c.VK_FALSE,
+        .depthBiasConstantFactor = 0.0,
+        .depthBiasClamp = 0.0,
+        .depthBiasSlopeFactor = 0.0,
+    };
+    _ = rasterizer;
+
+    c.vkDestroyShaderModule(self.device, vert_shader_module, null);
+    c.vkDestroyShaderModule(self.device, frag_shader_module, null);
+}
+
+fn createImageViews(self: *Self) !void {
+    self.swap_chain_image_views = try self.allocator.alloc(c.VkImageView, self.swap_chain_images.len);
+    for (self.swap_chain_images, 0..) |image, i| {
+        const image_view_create_info = c.VkImageViewCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = image,
+            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+            .format = self.swap_chain_image_format,
+            .components = .{
+                .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        const result = c.vkCreateImageView(self.device, &image_view_create_info, null, &self.swap_chain_image_views[i]);
+        if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreateImageViews;
+    }
 }
 
 fn createSwapChain(self: *Self) !void {
@@ -82,6 +213,7 @@ fn createSwapChain(self: *Self) !void {
     const present_mode = chooseSwapPresentMode(swap_chain_support.present_modes.?);
     const extent = choseSwapExtent(self, &swap_chain_support.capabilities);
     var image_count = swap_chain_support.capabilities.minImageCount + 1;
+    var result: c.VkResult = undefined;
 
     // 0 would indicate no limit to how many images
     if (swap_chain_support.capabilities.minImageCount > 0 and
@@ -123,8 +255,18 @@ fn createSwapChain(self: *Self) !void {
     swap_chain_create_info.clipped = c.VK_TRUE;
     swap_chain_create_info.oldSwapchain = null;
 
-    const result = c.vkCreateSwapchainKHR(self.device, &swap_chain_create_info, null, &self.swap_chain);
+    result = c.vkCreateSwapchainKHR(self.device, &swap_chain_create_info, null, &self.swap_chain);
     if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreateSwapChain;
+
+    result = c.vkGetSwapchainImagesKHR(self.device, self.swap_chain, &image_count, null);
+    if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreateSwapChain;
+
+    self.swap_chain_images = try self.allocator.alloc(c.VkImage, image_count);
+    result = c.vkGetSwapchainImagesKHR(self.device, self.swap_chain, &image_count, self.swap_chain_images.ptr);
+    if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreateSwapChain;
+
+    self.swap_chain_image_format = surface_format.format;
+    self.swap_chain_extent = extent;
 }
 
 fn querySwapChainSupport(self: *Self, device: c.VkPhysicalDevice) !models.SwapChainSupportDetails {
@@ -238,7 +380,7 @@ fn createLogicalDevice(self: *Self) !void {
     };
     device_create_info.enabledExtensionCount = @intCast(device_extensions.len);
     device_create_info.ppEnabledExtensionNames = @ptrCast(&device_extensions);
-    if (debug) {
+    if (DEBUG) {
         device_create_info.enabledLayerCount = @intCast(validation_layers.len);
         device_create_info.ppEnabledLayerNames = @ptrCast(&validation_layers);
     } else {
@@ -358,7 +500,7 @@ fn populateDebugMessengerCreateInfo(create_info: *c.VkDebugUtilsMessengerCreateI
 }
 
 fn setupDebugMessenger(self: *Self) !void {
-    if (!debug) return;
+    if (!DEBUG) return;
 
     var debug_create_info: c.VkDebugUtilsMessengerCreateInfoEXT = undefined;
     populateDebugMessengerCreateInfo(&debug_create_info);
@@ -405,7 +547,7 @@ fn getRequiredExtensions(self: *Self) ![][*]const u8 {
     for (0..glfw_ext_count) |i| {
         try glfw_ext_list.append(glfw_extensions[i]);
     }
-    if (debug) try glfw_ext_list.append(c.VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    if (DEBUG) try glfw_ext_list.append(c.VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
     // adding KHR_PORTABILITY_SUBSET is required for moltenVK
     try glfw_ext_list.append(c.VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
@@ -419,7 +561,7 @@ fn getRequiredExtensions(self: *Self) ![][*]const u8 {
 }
 
 fn createInstance(self: *Self) !void {
-    if (debug) {
+    if (DEBUG) {
         const layers_supported = try checkValidationLayerSupport(self);
         if (!layers_supported) return VulkanErrors.ValidationLayersNotAvailable;
     }
@@ -436,16 +578,16 @@ fn createInstance(self: *Self) !void {
     self.required_extensions = try getRequiredExtensions(self);
 
     var debug_create_info: c.VkDebugUtilsMessengerCreateInfoEXT = undefined;
-    if (debug) populateDebugMessengerCreateInfo(&debug_create_info);
+    if (DEBUG) populateDebugMessengerCreateInfo(&debug_create_info);
 
     var instance_create_info = c.VkInstanceCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &app_info,
         .enabledExtensionCount = @intCast(self.required_extensions.len),
         .ppEnabledExtensionNames = @ptrCast(self.required_extensions.ptr),
-        .ppEnabledLayerNames = if (debug) @ptrCast(&validation_layers) else null,
-        .enabledLayerCount = if (debug) validation_layers.len else 0,
-        .pNext = if (debug) @as(*c.VkDebugUtilsMessengerCreateInfoEXT, @ptrCast(&debug_create_info)) else null,
+        .ppEnabledLayerNames = if (DEBUG) @ptrCast(&validation_layers) else null,
+        .enabledLayerCount = if (DEBUG) validation_layers.len else 0,
+        .pNext = if (DEBUG) @as(*c.VkDebugUtilsMessengerCreateInfoEXT, @ptrCast(&debug_create_info)) else null,
     };
 
     instance_create_info.flags |= c.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
@@ -461,7 +603,10 @@ fn mainLoop(self: *Self) void {
 }
 
 fn cleanup(self: *Self) void {
-    if (debug) vk_utils.DestroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
+    if (DEBUG) vk_utils.DestroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
+    for (self.swap_chain_image_views) |image_view| {
+        c.vkDestroyImageView(self.device, image_view, null);
+    }
     c.vkDestroySwapchainKHR(self.device, self.swap_chain, null);
     c.vkDestroyDevice(self.device, null);
     c.vkDestroySurfaceKHR(self.instance, self.surface, null);

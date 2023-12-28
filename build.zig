@@ -24,7 +24,15 @@ pub fn build(b: *std.Build) void {
     }
 
     //exe.addIncludePath(.{ .path = "thirdparty/vma/" });
+    const vert = std.build.FileSource.relative("shaders/vert.spv");
+    exe.addAnonymousModule("shaders/vert.spv", .{
+        .source_file = vert,
+    });
 
+    const frag = std.build.FileSource.relative("shaders/frag.spv");
+    exe.addAnonymousModule("shaders/frag.spv", .{
+        .source_file = frag,
+    });
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

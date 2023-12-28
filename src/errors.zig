@@ -7,7 +7,9 @@ pub const VulkanErrors = error{
     CannotGetSurfaceCapabilities,
     CannotQuerySwapChain,
     CannotCreateSwapChain,
+    CannotCreateImageViews,
     CannotCreateLogicalDevice,
+    CannotCreateShaderModule,
     NoSuitablePhysicalDevice,
     DebugMessangerError,
 };
