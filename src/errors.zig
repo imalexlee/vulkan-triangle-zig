@@ -10,6 +10,8 @@ pub const VulkanErrors = error{
     CannotCreateImageViews,
     CannotCreateLogicalDevice,
     CannotCreateShaderModule,
+    CannotCreatePipelineLayout,
+    CannotCreateRenderPass,
     NoSuitablePhysicalDevice,
     DebugMessangerError,
 };

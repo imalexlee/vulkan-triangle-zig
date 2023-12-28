@@ -38,6 +38,10 @@ swap_chain_extent: c.VkExtent2D = undefined,
 swap_chain_image_format: c.VkFormat = undefined,
 swap_chain_image_views: []c.VkImageView = &.{},
 
+render_pass: c.VkRenderPass = null,
+pipeline_layout: c.VkPipelineLayout = null,
+graphics_pipeline: c.VkPipeline = null,
+
 fn debugCallback(
     severity: c.VkDebugUtilsMessageSeverityFlagBitsEXT,
     message_type: c.VkDebugUtilsMessageTypeFlagsEXT,
@@ -80,7 +84,45 @@ fn initVulkan(self: *Self) !void {
     try createLogicalDevice(self);
     try createSwapChain(self);
     try createImageViews(self);
+    try createRenderPass(self);
     try createGraphicsPipeline(self);
+}
+
+fn createRenderPass(self: *Self) !void {
+    const color_attachment_desc = c.VkAttachmentDescription{
+        .format = self.swap_chain_image_format,
+        .samples = c.VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        // we don't care about initial layout since we set the loading
+        // operation to clear the image anyway upon loading.
+        .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+    };
+
+    const attachment_ref = c.VkAttachmentReference{
+        .attachment = 0,
+        .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+
+    const subpass_desc = c.VkSubpassDescription{
+        .pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &attachment_ref,
+    };
+
+    const render_pass_create_info = c.VkRenderPassCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &color_attachment_desc,
+        .subpassCount = 1,
+        .pSubpasses = &subpass_desc,
+    };
+
+    const result = c.vkCreateRenderPass(self.device, &render_pass_create_info, null, &self.render_pass);
+    if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreateRenderPass;
 }
 
 fn createGraphicsPipeline(self: *Self) !void {
@@ -89,6 +131,8 @@ fn createGraphicsPipeline(self: *Self) !void {
 
     const vert_shader_module = try vk_utils.createShaderModule(self.device, &vert_shader_code);
     const frag_shader_module = try vk_utils.createShaderModule(self.device, &frag_shader_code);
+
+    var result: c.VkResult = undefined;
 
     const vert_shader_stage_info = c.VkPipelineShaderStageCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -105,7 +149,6 @@ fn createGraphicsPipeline(self: *Self) !void {
     };
 
     const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{ vert_shader_stage_info, frag_shader_stage_info };
-    _ = shader_stages;
 
     const vertex_input_info = c.VkPipelineVertexInputStateCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -115,49 +158,27 @@ fn createGraphicsPipeline(self: *Self) !void {
         .pVertexAttributeDescriptions = null,
     };
 
-    _ = vertex_input_info;
-
     const input_assembly = c.VkPipelineInputAssemblyStateCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         .primitiveRestartEnable = c.VK_FALSE,
     };
-    _ = input_assembly;
 
-    // viewport and scissor structs defined if going with static sizing
-    //
-    //  const viewport = c.VkViewport{
-    //      .x = 0.0,
-    //      .y = 0.0,
-    //      .width = self.swap_chain_extent.width,
-    //      .height = self.swap_chain_extent.height,
-    //      .minDepth = 0.0,
-    //      .maxDepth = 1.0,
-    //  };
-    //
-    //    const scissor = c.VkRect2D{
-    //        .offset = .{.x = 0, .y = 0,},
-    //        .extent = self.swap_chain_extent,
-    //    };
     const dynamic_states = [_]c.VkDynamicState{
         c.VK_DYNAMIC_STATE_VIEWPORT,
         c.VK_DYNAMIC_STATE_SCISSOR,
     };
-
     const dynamic_state_info = c.VkPipelineDynamicStateCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
         .pDynamicStates = &dynamic_states,
         .dynamicStateCount = @intCast(dynamic_states.len),
     };
 
-    _ = dynamic_state_info;
-
     const viewport_state_info = c.VkPipelineViewportStateCreateInfo{
-        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         .scissorCount = 1,
         .viewportCount = 1,
     };
-    _ = viewport_state_info;
 
     const rasterizer = c.VkPipelineRasterizationStateCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
@@ -174,7 +195,73 @@ fn createGraphicsPipeline(self: *Self) !void {
         .depthBiasClamp = 0.0,
         .depthBiasSlopeFactor = 0.0,
     };
-    _ = rasterizer;
+
+    const multisampling_create_info = c.VkPipelineMultisampleStateCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .sampleShadingEnable = c.VK_FALSE,
+        .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT,
+        .minSampleShading = 1.0,
+        .pSampleMask = null,
+        .alphaToCoverageEnable = c.VK_FALSE,
+        .alphaToOneEnable = c.VK_FALSE,
+    };
+
+    // here we've disable both blending and bitwise op color blending.
+    // this means that colors are written to the framebuffer unmodified.
+    const color_blend_attachment = c.VkPipelineColorBlendAttachmentState{
+        .colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT |
+            c.VK_COLOR_COMPONENT_G_BIT |
+            c.VK_COLOR_COMPONENT_B_BIT |
+            c.VK_COLOR_COMPONENT_A_BIT,
+        .blendEnable = c.VK_FALSE,
+        // these get thrown out since blending is disabled
+        // just here for reference
+        .srcColorBlendFactor = c.VK_BLEND_FACTOR_ONE,
+        .dstColorBlendFactor = c.VK_BLEND_FACTOR_ZERO,
+        .colorBlendOp = c.VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = c.VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = c.VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = c.VK_BLEND_OP_ADD,
+    };
+
+    const color_blending = c.VkPipelineColorBlendStateCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = c.VK_FALSE,
+        .logicOp = c.VK_LOGIC_OP_COPY,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+    };
+
+    const layout_create_info = c.VkPipelineLayoutCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 0,
+        .pSetLayouts = null,
+        .pushConstantRangeCount = 0,
+        .pPushConstantRanges = null,
+    };
+
+    result = c.vkCreatePipelineLayout(self.device, &layout_create_info, null, &self.pipeline_layout);
+    if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreatePipelineLayout;
+
+    const pipeline_create_info = c.VkGraphicsPipelineCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = 2,
+        .pStages = &shader_stages,
+        .pVertexInputState = &vertex_input_info,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state_info,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling_create_info,
+        .pDepthStencilState = null,
+        .pColorBlendState = &color_blending,
+        .pDynamicState = &dynamic_state_info,
+        .layout = self.pipeline_layout,
+        .renderPass = self.render_pass,
+        .subpass = 0,
+    };
+
+    result = c.vkCreateGraphicsPipelines(self.device, null, 1, &pipeline_create_info, null, &self.graphics_pipeline);
+    if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreatePipelineLayout;
 
     c.vkDestroyShaderModule(self.device, vert_shader_module, null);
     c.vkDestroyShaderModule(self.device, frag_shader_module, null);
@@ -374,7 +461,7 @@ fn createLogicalDevice(self: *Self) !void {
 
     var device_create_info = c.VkDeviceCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pQueueCreateInfos = @ptrCast(queues.ptr),
+        .pQueueCreateInfos = queues.ptr,
         .queueCreateInfoCount = @intCast(queues.len),
         .pEnabledFeatures = &device_features,
     };
@@ -604,6 +691,9 @@ fn mainLoop(self: *Self) void {
 
 fn cleanup(self: *Self) void {
     if (DEBUG) vk_utils.DestroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
+    c.vkDestroyPipeline(self.device, self.graphics_pipeline, null);
+    c.vkDestroyPipelineLayout(self.device, self.pipeline_layout, null);
+    c.vkDestroyRenderPass(self.device, self.render_pass, null);
     for (self.swap_chain_image_views) |image_view| {
         c.vkDestroyImageView(self.device, image_view, null);
     }
