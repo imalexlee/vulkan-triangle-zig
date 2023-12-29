@@ -12,6 +12,12 @@ pub const VulkanErrors = error{
     CannotCreateShaderModule,
     CannotCreatePipelineLayout,
     CannotCreateRenderPass,
+    CannotCreateFrameBuffers,
+    CannotCreateCommandPool,
+    CannotCreateCommandBuffer,
+    CannotRecordCommandBuffer,
+    CannotCreateSyncObjects,
+    CannotDrawFrame,
     NoSuitablePhysicalDevice,
     DebugMessangerError,
 };
