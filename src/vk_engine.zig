@@ -10,6 +10,7 @@ const GlfwErrors = errors.GlfwErrors;
 
 const WIDTH = 800;
 const HEIGHT = 600;
+const MAX_FRAMES_IN_FLIGHT = 2;
 const DEBUG: bool = std.debug.runtime_safety;
 const validation_layers = [_][*:0]const u8{
     "VK_LAYER_KHRONOS_validation",
@@ -44,11 +45,13 @@ pipeline_layout: c.VkPipelineLayout = null,
 graphics_pipeline: c.VkPipeline = null,
 
 command_pool: c.VkCommandPool = null,
-command_buffer: c.VkCommandBuffer = null,
+command_buffers: []c.VkCommandBuffer = &.{},
 
-image_available_semaphore: c.VkSemaphore = null,
-render_finished_semaphore: c.VkSemaphore = null,
-in_flight_fence: c.VkFence = null,
+//syncing stuff
+image_available_semaphores: []c.VkSemaphore = &.{},
+render_finished_semaphores: []c.VkSemaphore = &.{},
+in_flight_fences: []c.VkFence = &.{},
+current_frame: u1 = 0,
 
 fn debugCallback(
     severity: c.VkDebugUtilsMessageSeverityFlagBitsEXT,
@@ -96,12 +99,25 @@ fn initVulkan(self: *Self) !void {
     try createGraphicsPipeline(self);
     try createFrameBuffers(self);
     try createCommandPool(self);
-    try createCommandBuffer(self);
+    try createCommandBuffers(self);
     try createSyncObjects(self);
+}
+
+fn recreateSwapchain(self: *Self) !void {
+    _ = c.vkDeviceWaitIdle(self.device);
+    try cleanupSwapchain(self);
+    try createSwapChain(self);
+    try createImageViews(self);
+    try createFrameBuffers(self);
 }
 
 fn createSyncObjects(self: *Self) !void {
     var result: c.VkResult = undefined;
+
+    self.image_available_semaphores = try self.allocator.alloc(c.VkSemaphore, MAX_FRAMES_IN_FLIGHT);
+    self.render_finished_semaphores = try self.allocator.alloc(c.VkSemaphore, MAX_FRAMES_IN_FLIGHT);
+    self.in_flight_fences = try self.allocator.alloc(c.VkFence, MAX_FRAMES_IN_FLIGHT);
+
     const semaphore_create_info = c.VkSemaphoreCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
     };
@@ -110,25 +126,28 @@ fn createSyncObjects(self: *Self) !void {
         .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
     };
 
-    result = c.vkCreateSemaphore(self.device, &semaphore_create_info, null, &self.image_available_semaphore);
-    if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreateSyncObjects;
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        result = c.vkCreateSemaphore(self.device, &semaphore_create_info, null, &self.image_available_semaphores[i]);
+        if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreateSyncObjects;
 
-    result = c.vkCreateSemaphore(self.device, &semaphore_create_info, null, &self.render_finished_semaphore);
-    if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreateSyncObjects;
+        result = c.vkCreateSemaphore(self.device, &semaphore_create_info, null, &self.render_finished_semaphores[i]);
+        if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreateSyncObjects;
 
-    result = c.vkCreateFence(self.device, &fence_create_info, null, &self.in_flight_fence);
-    if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreateSyncObjects;
+        result = c.vkCreateFence(self.device, &fence_create_info, null, &self.in_flight_fences[i]);
+        if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreateSyncObjects;
+    }
 }
 
-fn createCommandBuffer(self: *Self) !void {
+fn createCommandBuffers(self: *Self) !void {
+    self.command_buffers = try self.allocator.alloc(c.VkCommandBuffer, MAX_FRAMES_IN_FLIGHT);
     const command_buffer_allocate_info = c.VkCommandBufferAllocateInfo{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = self.command_pool,
         .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1,
+        .commandBufferCount = @intCast(self.command_buffers.len),
     };
 
-    const result = c.vkAllocateCommandBuffers(self.device, &command_buffer_allocate_info, &self.command_buffer);
+    const result = c.vkAllocateCommandBuffers(self.device, &command_buffer_allocate_info, self.command_buffers.ptr);
     if (result != c.VK_SUCCESS) return VulkanErrors.CannotCreateCommandBuffer;
 }
 
@@ -136,8 +155,7 @@ fn recordCommandBuffer(self: *Self, command_buffer: c.VkCommandBuffer, image_ind
     var result: c.VkResult = undefined;
     const begin_info = c.VkCommandBufferBeginInfo{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .flags = 0,
-        .pInheritanceInfo = null,
+        //.flags = c.VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT,
     };
 
     result = c.vkBeginCommandBuffer(command_buffer, &begin_info);
@@ -843,22 +861,32 @@ fn mainLoop(self: *Self) !void {
 fn drawFrame(self: *Self) !void {
     var result: c.VkResult = undefined;
 
-    result = c.vkWaitForFences(self.device, 1, &self.in_flight_fence, c.VK_TRUE, std.math.maxInt(u64));
-    if (result != c.VK_SUCCESS) return VulkanErrors.CannotDrawFrame;
-
-    result = c.vkResetFences(self.device, 1, &self.in_flight_fence);
+    result = c.vkWaitForFences(self.device, 1, &self.in_flight_fences[self.current_frame], c.VK_TRUE, std.math.maxInt(u64));
     if (result != c.VK_SUCCESS) return VulkanErrors.CannotDrawFrame;
 
     var image_index: u32 = undefined;
-    _ = c.vkAcquireNextImageKHR(self.device, self.swap_chain, std.math.maxInt(u64), self.image_available_semaphore, null, &image_index);
+    result = c.vkAcquireNextImageKHR(self.device, self.swap_chain, std.math.maxInt(u64), self.image_available_semaphores[self.current_frame], null, &image_index);
 
-    _ = c.vkResetCommandBuffer(self.command_buffer, 0);
+    switch (result) {
+        c.VK_ERROR_OUT_OF_DATE_KHR => {
+            try recreateSwapchain(self);
+            return;
+        },
+        c.VK_SUBOPTIMAL_KHR => {},
+        c.VK_SUCCESS => {},
+        else => return VulkanErrors.CannotDrawFrame,
+    }
 
-    try recordCommandBuffer(self, self.command_buffer, image_index);
+    result = c.vkResetFences(self.device, 1, &self.in_flight_fences[self.current_frame]);
+    if (result != c.VK_SUCCESS) return VulkanErrors.CannotDrawFrame;
 
-    const wait_semaphores = [_]c.VkSemaphore{self.image_available_semaphore};
+    _ = c.vkResetCommandBuffer(self.command_buffers[self.current_frame], 0);
+
+    try recordCommandBuffer(self, self.command_buffers[self.current_frame], image_index);
+
+    const wait_semaphores = [_]c.VkSemaphore{self.image_available_semaphores[self.current_frame]};
+    const signal_semaphores = [_]c.VkSemaphore{self.render_finished_semaphores[self.current_frame]};
     const wait_stages = [_]c.VkPipelineStageFlags{c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    const signal_semaphores = [_]c.VkSemaphore{self.render_finished_semaphore};
 
     const submit_info = c.VkSubmitInfo{
         .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -866,12 +894,12 @@ fn drawFrame(self: *Self) !void {
         .pWaitSemaphores = &wait_semaphores,
         .pWaitDstStageMask = &wait_stages,
         .commandBufferCount = 1,
-        .pCommandBuffers = &self.command_buffer,
+        .pCommandBuffers = &self.command_buffers[self.current_frame],
         .signalSemaphoreCount = 1,
         .pSignalSemaphores = &signal_semaphores,
     };
 
-    result = c.vkQueueSubmit(self.graphics_queue, 1, &submit_info, self.in_flight_fence);
+    result = c.vkQueueSubmit(self.graphics_queue, 1, &submit_info, self.in_flight_fences[self.current_frame]);
     if (result != c.VK_SUCCESS) return VulkanErrors.CannotDrawFrame;
 
     const swap_chains = [_]c.VkSwapchainKHR{self.swap_chain};
@@ -885,26 +913,49 @@ fn drawFrame(self: *Self) !void {
         .pResults = null,
     };
 
-    _ = c.vkQueuePresentKHR(self.present_queue, &present_info);
+    result = c.vkQueuePresentKHR(self.present_queue, &present_info);
+
+    switch (result) {
+        c.VK_ERROR_OUT_OF_DATE_KHR, c.VK_SUBOPTIMAL_KHR => {
+            try recreateSwapchain(self);
+        },
+        c.VK_SUCCESS => {},
+        else => return VulkanErrors.CannotDrawFrame,
+    }
+
+    // flip current frame between 1 and 0.
+    // only works if MAX_FRAMES_IN_FLIGHT == 2 but this is a hot function
+    // so might as well.
+    self.current_frame ^= 1;
+}
+
+fn cleanupSwapchain(self: *Self) !void {
+    for (self.swap_chain_frame_buffers) |frame_buffer| {
+        c.vkDestroyFramebuffer(self.device, frame_buffer, null);
+    }
+
+    for (self.swap_chain_image_views) |image_view| {
+        c.vkDestroyImageView(self.device, image_view, null);
+    }
+
+    c.vkDestroySwapchainKHR(self.device, self.swap_chain, null);
 }
 
 fn cleanup(self: *Self) void {
+    try cleanupSwapchain(self);
     if (DEBUG) vk_utils.DestroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
-    c.vkDestroySemaphore(self.device, self.image_available_semaphore, null);
-    c.vkDestroySemaphore(self.device, self.render_finished_semaphore, null);
-    c.vkDestroyFence(self.device, self.in_flight_fence, null);
+
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        c.vkDestroySemaphore(self.device, self.image_available_semaphores[i], null);
+        c.vkDestroySemaphore(self.device, self.render_finished_semaphores[i], null);
+        c.vkDestroyFence(self.device, self.in_flight_fences[i], null);
+    }
+
     c.vkDestroyCommandPool(self.device, self.command_pool, null);
     c.vkDestroyPipeline(self.device, self.graphics_pipeline, null);
     c.vkDestroyPipelineLayout(self.device, self.pipeline_layout, null);
     c.vkDestroyRenderPass(self.device, self.render_pass, null);
 
-    for (self.swap_chain_frame_buffers) |frame_buffer| {
-        c.vkDestroyFramebuffer(self.device, frame_buffer, null);
-    }
-    for (self.swap_chain_image_views) |image_view| {
-        c.vkDestroyImageView(self.device, image_view, null);
-    }
-    c.vkDestroySwapchainKHR(self.device, self.swap_chain, null);
     c.vkDestroyDevice(self.device, null);
     c.vkDestroySurfaceKHR(self.instance, self.surface, null);
     c.vkDestroyInstance(self.instance, null);
