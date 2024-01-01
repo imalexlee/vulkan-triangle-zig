@@ -95,7 +95,7 @@ fn initWindow(self: *Self) !void {
     const result = c.glfwInit();
     if (result != c.GL_TRUE) return GlfwErrors.WindowCreationError;
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
-    self.window = c.glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", null, null);
+    self.window = c.glfwCreateWindow(WIDTH, HEIGHT, "Vulkan Triangle Zig", null, null);
     c.glfwSetWindowUserPointer(self.window, self);
 
     _ = c.glfwSetFramebufferSizeCallback(self.window, @ptrCast(&framebufferResizeCallback));
