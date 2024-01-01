@@ -52,6 +52,7 @@ image_available_semaphores: []c.VkSemaphore = &.{},
 render_finished_semaphores: []c.VkSemaphore = &.{},
 in_flight_fences: []c.VkFence = &.{},
 current_frame: u1 = 0,
+frame_buffer_resized: bool = false,
 
 fn debugCallback(
     severity: c.VkDebugUtilsMessageSeverityFlagBitsEXT,
@@ -65,6 +66,16 @@ fn debugCallback(
 
     std.debug.print("validation layer: {s}\n", .{callback_data.pMessage});
     return c.VK_FALSE;
+}
+
+fn framebufferResizeCallback(window: *c.GLFWwindow, width: c_int, height: c_int) callconv(.C) void {
+    _ = width;
+    _ = height;
+    const res = c.glfwGetWindowUserPointer(window);
+    if (res != null) {
+        const app = @as(*Self, @ptrCast(@alignCast(res.?)));
+        app.frame_buffer_resized = true;
+    }
 }
 
 pub fn init(allocator: std.mem.Allocator) Self {
@@ -85,6 +96,9 @@ fn initWindow(self: *Self) !void {
     if (result != c.GL_TRUE) return GlfwErrors.WindowCreationError;
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
     self.window = c.glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", null, null);
+    c.glfwSetWindowUserPointer(self.window, self);
+
+    _ = c.glfwSetFramebufferSizeCallback(self.window, @ptrCast(&framebufferResizeCallback));
 }
 
 fn initVulkan(self: *Self) !void {
@@ -104,6 +118,15 @@ fn initVulkan(self: *Self) !void {
 }
 
 fn recreateSwapchain(self: *Self) !void {
+    var width: c_int = 0;
+    var height: c_int = 0;
+
+    c.glfwGetWindowSize(self.window, &width, &height);
+
+    while (width == 0 or height == 0) {
+        c.glfwGetWindowSize(self.window, &width, &height);
+        c.glfwWaitEvents();
+    }
     _ = c.vkDeviceWaitIdle(self.device);
     try cleanupSwapchain(self);
     try createSwapChain(self);
@@ -915,12 +938,11 @@ fn drawFrame(self: *Self) !void {
 
     result = c.vkQueuePresentKHR(self.present_queue, &present_info);
 
-    switch (result) {
-        c.VK_ERROR_OUT_OF_DATE_KHR, c.VK_SUBOPTIMAL_KHR => {
-            try recreateSwapchain(self);
-        },
-        c.VK_SUCCESS => {},
-        else => return VulkanErrors.CannotDrawFrame,
+    if (self.frame_buffer_resized or result == c.VK_ERROR_OUT_OF_DATE_KHR or result == c.VK_SUBOPTIMAL_KHR) {
+        try recreateSwapchain(self);
+        self.frame_buffer_resized = false;
+    } else if (result != c.VK_SUCCESS) {
+        return VulkanErrors.CannotDrawFrame;
     }
 
     // flip current frame between 1 and 0.
