@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const exe = b.addExecutable(.{
-        .name = "vulkan-tutorial-zig",
+        .name = "vulkan-triangle-zig",
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
@@ -18,12 +18,6 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary(vk_lib_name);
     exe.linkSystemLibrary("glfw.3");
 
-    if (b.env_map.get("VK_SDK_PATH")) |path| {
-        exe.addLibraryPath(.{ .cwd_relative = std.fmt.allocPrint(b.allocator, "{s}/lib", .{path}) catch @panic("OOM") });
-        exe.addIncludePath(.{ .cwd_relative = std.fmt.allocPrint(b.allocator, "{s}/include", .{path}) catch @panic("OOM") });
-    }
-
-    //exe.addIncludePath(.{ .path = "thirdparty/vma/" });
     const vert = std.build.FileSource.relative("shaders/vert.spv");
     exe.addAnonymousModule("shaders/vert.spv", .{
         .source_file = vert,
