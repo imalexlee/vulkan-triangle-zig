@@ -633,13 +633,18 @@ fn createLogicalDevice(self: *Self) !void {
 
     var queue_priority: f32 = 1.0;
 
-    const unique_queue_families = [_]?u32{ indices.graphics_family, indices.present_family };
-    var queues = try self.allocator.alloc(c.VkDeviceQueueCreateInfo, unique_queue_families.len);
+    var unique_queue_families = std.AutoArrayHashMap(u32, u32).init(self.allocator);
+    defer unique_queue_families.deinit();
+    try unique_queue_families.put(indices.graphics_family.?, indices.graphics_family.?);
+    try unique_queue_families.put(indices.present_family.?, indices.present_family.?);
+
+    var queues = try self.allocator.alloc(c.VkDeviceQueueCreateInfo, unique_queue_families.count());
     defer self.allocator.free(queues);
-    for (unique_queue_families, 0..) |family, i| {
+
+    for (unique_queue_families.values(), 0..) |family, i| {
         const queue_create_info = c.VkDeviceQueueCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            .queueFamilyIndex = family.?,
+            .queueFamilyIndex = family,
             .queueCount = 1,
             .pQueuePriorities = &queue_priority,
         };
