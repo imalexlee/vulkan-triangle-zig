@@ -737,7 +737,7 @@ fn checkDeviceExtensionSupport(self: *Self, device: c.VkPhysicalDevice) !bool {
 }
 
 fn findQueueFamilies(self: *Self, physical_device: c.VkPhysicalDevice) !models.QueueFamilyIndices {
-    var indices: models.QueueFamilyIndices = undefined;
+    var indices = models.QueueFamilyIndices{};
     var queue_family_count: u32 = 0;
 
     c.vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, null);
